@@ -13,7 +13,9 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -23,9 +25,7 @@ const upload = multer({
 const jobs = new Map();
 
 function uid() {
-  return crypto.randomUUID
-    ? crypto.randomBytes(16).toString("hex")
-    : crypto.randomUUID();
+  return crypto.randomBytes(16).toString("hex");
 }
 
 function runCmd(bin, args) {
@@ -62,6 +62,8 @@ async function ffprobeDuration(filePath) {
   });
 }
 
+/* ---------- TTS ---------- */
+
 async function ttsToWav(text, wavPath) {
   if (!text || text === "undefined") {
     throw new Error("storyText is empty or undefined");
@@ -82,7 +84,7 @@ async function normalizeToWav(inPath, outPath) {
   await runCmd("ffmpeg", [
     "-y",
     "-i", inPath,
-    "-filter:a", "atempo=0.85",
+    "-filter:a", "atempo=0.9",
     "-ar", "48000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
@@ -100,10 +102,55 @@ async function wavToM4a(inWav, outM4a) {
   ]);
 }
 
-async function imagesPlusAudio(imagePaths, audioPath, outMp4) {
+/* ---------- SRT ---------- */
+
+function secondsToSrtTime(sec) {
+  const date = new Date(sec * 1000);
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
+  return `${hh}:${mm}:${ss},${ms}`;
+}
+
+async function createSrtFile(text, audioDuration, srtPath) {
+  const lines = text
+    .split(/\n+/)
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  if (!lines.length) throw new Error("No subtitle lines found");
+
+  const perLine = audioDuration / lines.length;
+
+  let current = 0;
+  let srt = "";
+
+  lines.forEach((line, i) => {
+    const start = current;
+    const end = current + perLine;
+
+    srt += `${i + 1}\n`;
+    srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
+    srt += `${line}\n\n`;
+
+    current = end;
+  });
+
+  await fsp.writeFile(srtPath, srt);
+}
+
+/* ---------- VIDEO ---------- */
+
+async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
 
   const duration = await ffprobeDuration(audioPath);
   const perImage = duration / imagePaths.length;
+
+  const jobDir = path.dirname(outMp4);
+  const srtPath = path.join(jobDir, "subtitles.srt");
+
+  await createSrtFile(storyText, duration, srtPath);
 
   const args = ["-y"];
 
@@ -127,7 +174,11 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4) {
   }
 
   const concatRefs = imagePaths.map((_, i) => `[v${i}]`).join("");
-  filters.push(`${concatRefs}concat=n=${imagePaths.length}:v=1:a=0[vout]`);
+  filters.push(`${concatRefs}concat=n=${imagePaths.length}:v=1:a=0[vtmp]`);
+
+  filters.push(
+    `[vtmp]subtitles=${srtPath}:force_style='FontSize=38,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1,Alignment=2'[vout]`
+  );
 
   args.push(
     "-filter_complex", filters.join(";"),
@@ -143,6 +194,8 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4) {
   await runCmd("ffmpeg", args);
 }
 
+/* ---------- JOB PROCESS ---------- */
+
 async function processJob(jobId, jobDir, bgPaths, storyText) {
   try {
     const clipsDir = path.join(jobDir, "clips");
@@ -151,22 +204,28 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
     const raw = path.join(clipsDir, "tts_raw.wav");
     const norm = path.join(clipsDir, "tts.wav");
     const audioM4a = path.join(jobDir, "audio.m4a");
+    const outMp4 = path.join(jobDir, "output.mp4");
 
     await ttsToWav(storyText, raw);
     await normalizeToWav(raw, norm);
     await wavToM4a(norm, audioM4a);
 
-    const outMp4 = path.join(jobDir, "output.mp4");
-    await imagesPlusAudio(bgPaths, audioM4a, outMp4);
+    await imagesPlusAudio(bgPaths, audioM4a, outMp4, storyText);
 
-    jobs.get(jobId).status = "done";
-    jobs.get(jobId).outputPath = outMp4;
+    jobs.set(jobId, {
+      status: "done",
+      outputPath: outMp4,
+    });
 
   } catch (err) {
-    jobs.get(jobId).status = "error";
-    jobs.get(jobId).error = err.message;
+    jobs.set(jobId, {
+      status: "error",
+      error: err.message,
+    });
   }
 }
+
+/* ---------- ROUTES ---------- */
 
 app.post("/render10min/start", upload.any(), async (req, res) => {
   try {
@@ -175,13 +234,11 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
     }
 
     const storyText = (req.body?.storyText || "").trim();
-
     if (!storyText) {
       return res.status(400).json({ error: "storyText missing" });
     }
 
     const files = Array.isArray(req.files) ? req.files : [];
-
     if (!files.length) {
       return res.status(400).json({ error: "No image uploaded" });
     }
