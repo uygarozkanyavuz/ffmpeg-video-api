@@ -62,7 +62,7 @@ async function ffprobeDuration(filePath) {
   });
 }
 
-/* ---------- TTS ---------- */
+/* ---------------- TTS ---------------- */
 
 async function ttsToWav(text, wavPath) {
   if (!text || text === "undefined") {
@@ -102,7 +102,7 @@ async function wavToM4a(inWav, outM4a) {
   ]);
 }
 
-/* ---------- SRT ---------- */
+/* ---------------- SRT ---------------- */
 
 function secondsToSrtTime(sec) {
   const date = new Date(sec * 1000);
@@ -114,25 +114,31 @@ function secondsToSrtTime(sec) {
 }
 
 async function createSrtFile(text, audioDuration, srtPath) {
-  const lines = text
-    .split(/\n+/)
-    .map(l => l.trim())
+
+  const sentences = text
+    .replace(/\n+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.trim())
     .filter(Boolean);
 
-  if (!lines.length) throw new Error("No subtitle lines found");
+  if (!sentences.length) throw new Error("No subtitle sentences found");
 
-  const perLine = audioDuration / lines.length;
+  const totalChars = sentences.reduce((sum, s) => sum + s.length, 0);
 
   let current = 0;
   let srt = "";
 
-  lines.forEach((line, i) => {
+  sentences.forEach((sentence, i) => {
+
+    const ratio = sentence.length / totalChars;
+    const duration = audioDuration * ratio;
+
     const start = current;
-    const end = current + perLine;
+    const end = current + duration;
 
     srt += `${i + 1}\n`;
     srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
-    srt += `${line}\n\n`;
+    srt += `${sentence}\n\n`;
 
     current = end;
   });
@@ -140,7 +146,7 @@ async function createSrtFile(text, audioDuration, srtPath) {
   await fsp.writeFile(srtPath, srt);
 }
 
-/* ---------- VIDEO ---------- */
+/* ---------------- VIDEO ---------------- */
 
 async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
 
@@ -176,8 +182,9 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
   const concatRefs = imagePaths.map((_, i) => `[v${i}]`).join("");
   filters.push(`${concatRefs}concat=n=${imagePaths.length}:v=1:a=0[vtmp]`);
 
+  // Daha küçük ve dengeli altyazı
   filters.push(
-    `[vtmp]subtitles=${srtPath}:force_style='FontSize=38,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1,Alignment=2'[vout]`
+    `[vtmp]subtitles=${srtPath}:force_style='FontSize=24,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`
   );
 
   args.push(
@@ -194,7 +201,7 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
   await runCmd("ffmpeg", args);
 }
 
-/* ---------- JOB PROCESS ---------- */
+/* ---------------- JOB PROCESS ---------------- */
 
 async function processJob(jobId, jobDir, bgPaths, storyText) {
   try {
@@ -225,10 +232,11 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
   }
 }
 
-/* ---------- ROUTES ---------- */
+/* ---------------- ROUTES ---------------- */
 
 app.post("/render10min/start", upload.any(), async (req, res) => {
   try {
+
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "OPENAI_API_KEY missing" });
     }
