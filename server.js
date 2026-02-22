@@ -24,8 +24,8 @@ const jobs = new Map();
 
 function uid() {
   return crypto.randomUUID
-    ? crypto.randomUUID()
-    : crypto.randomBytes(16).toString("hex");
+    ? crypto.randomBytes(16).toString("hex")
+    : crypto.randomUUID();
 }
 
 function runCmd(bin, args) {
@@ -45,7 +45,28 @@ async function writeFileSafe(filePath, buffer) {
   await fsp.writeFile(filePath, buffer);
 }
 
+async function ffprobeDuration(filePath) {
+  return new Promise((resolve) => {
+    const p = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ]);
+
+    let out = "";
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.on("close", () => {
+      resolve(Number(out.trim()) || 0);
+    });
+  });
+}
+
 async function ttsToWav(text, wavPath) {
+  if (!text || text === "undefined") {
+    throw new Error("storyText is empty or undefined");
+  }
+
   const response = await openai.audio.speech.create({
     model: "gpt-4o-mini-tts",
     voice: "marin",
@@ -78,13 +99,19 @@ async function wavToM4a(inWav, outM4a) {
   ]);
 }
 
-async function imagesPlusAudioToMp4(imagePaths, audioPath, outMp4) {
-  const fps = 30;
+async function imagesPlusAudio(imagePaths, audioPath, outMp4) {
+
+  const duration = await ffprobeDuration(audioPath);
+  const perImage = duration / imagePaths.length;
 
   const args = ["-y"];
 
-  for (const p of imagePaths) {
-    args.push("-loop", "1", "-t", "5", "-i", p);
+  for (const img of imagePaths) {
+    args.push(
+      "-loop", "1",
+      "-t", perImage.toString(),
+      "-i", img
+    );
   }
 
   const audioIndex = imagePaths.length;
@@ -98,8 +125,8 @@ async function imagesPlusAudioToMp4(imagePaths, audioPath, outMp4) {
     );
   }
 
-  const vrefs = imagePaths.map((_, i) => `[v${i}]`).join("");
-  filters.push(`${vrefs}concat=n=${imagePaths.length}:v=1:a=0[vout]`);
+  const concatRefs = imagePaths.map((_, i) => `[v${i}]`).join("");
+  filters.push(`${concatRefs}concat=n=${imagePaths.length}:v=1:a=0[vout]`);
 
   args.push(
     "-filter_complex", filters.join(";"),
@@ -129,7 +156,7 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
     await wavToM4a(norm, audioM4a);
 
     const outMp4 = path.join(jobDir, "output.mp4");
-    await imagesPlusAudioToMp4(bgPaths, audioM4a, outMp4);
+    await imagesPlusAudio(bgPaths, audioM4a, outMp4);
 
     jobs.get(jobId).status = "done";
     jobs.get(jobId).outputPath = outMp4;
@@ -146,7 +173,8 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
       return res.status(500).json({ error: "OPENAI_API_KEY missing" });
     }
 
-    const storyText = req.body?.storyText;
+    const storyText = (req.body?.storyText || "").trim();
+
     if (!storyText) {
       return res.status(400).json({ error: "storyText missing" });
     }
@@ -161,7 +189,6 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
     const jobDir = path.join(os.tmpdir(), `job_${jobId}`);
     await fsp.mkdir(jobDir, { recursive: true });
 
-    // ✅ TÜM binary dosyaları bg kabul ediyoruz
     const bgPaths = [];
 
     for (let i = 0; i < files.length; i++) {
