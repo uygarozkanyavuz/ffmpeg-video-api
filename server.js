@@ -452,31 +452,48 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
       return res.status(400).json({ error: "Missing image files. Send bg1..bgN (or image)." });
     }
 
-    if (!req.body?.plan) {
-      return res.status(400).json({ error: "Missing plan field" });
+    const storyText = req.body?.storyText;
+
+    let plan = null;
+
+    // Eğer plan gönderildiyse parse et
+    if (req.body?.plan) {
+      try {
+        plan = JSON.parse(req.body.plan);
+      } catch (e) {
+        return res.status(400).json({ error: "Plan JSON parse error" });
+      }
     }
 
-    let plan;
-    try {
-      plan = JSON.parse(req.body.plan);
-    } catch (e) {
-      return res.status(400).json({ error: "Plan JSON parse error" });
+    // Eğer plan yok ama storyText varsa otomatik plan oluştur
+    if (!plan && storyText) {
+      plan = {
+        introText: "",
+        outroText: "",
+        useBismillahClip: false,
+        segments: [
+          {
+            ayah: 1,
+            arabicAudioUrl: null,
+            trText: storyText
+          }
+        ],
+        videoFx: {
+          motion: true,
+          sparks: true,
+          cta: true,
+          ctaDurationSec: 4
+        }
+      };
     }
 
-    // Accept:
-    // - bg1, bg2, ... bgN
-    // - optional cta
-    // - optional image
+    if (!plan) {
+      return res.status(400).json({ error: "Missing plan or storyText field" });
+    }
+
     const validBgs = files
       .filter((f) => f?.buffer && typeof f.fieldname === "string")
-      .filter((f) => f.fieldname === "image" || /^bg\d+$/i.test(f.fieldname))
-      .sort((a, b) => {
-        if (a.fieldname === "image" && b.fieldname !== "image") return -1;
-        if (b.fieldname === "image" && a.fieldname !== "image") return 1;
-        const na = Number(String(a.fieldname).replace(/^\D+/g, "")) || 0;
-        const nb = Number(String(b.fieldname).replace(/^\D+/g, "")) || 0;
-        return na - nb;
-      });
+      .filter((f) => f.fieldname === "image" || /^bg\d+$/i.test(f.fieldname));
 
     if (!validBgs.length) {
       return res.status(400).json({ error: "No valid bg files. Use bg1..bgN or image." });
@@ -486,15 +503,14 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
     const jobDir = path.join(os.tmpdir(), `render10min_${jobId}`);
     await fsp.mkdir(jobDir, { recursive: true });
 
-    // Write BGs
     const bgPaths = [];
+
     for (let i = 0; i < validBgs.length; i++) {
       const p = path.join(jobDir, `bg_${String(i + 1).padStart(2, "0")}.png`);
       await writeFileSafe(p, validBgs[i].buffer);
       bgPaths.push(p);
     }
 
-    // Resolve CTA
     const ctaPath = await resolveCta(jobDir, files);
 
     jobs.set(jobId, {
@@ -504,9 +520,11 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
       createdAt: Date.now(),
     });
 
-    setImmediate(() => processJob(jobId, jobDir, bgPaths, plan, ctaPath));
+    setImmediate(() =>
+      processJob(jobId, jobDir, bgPaths, plan, ctaPath)
+    );
 
-    res.json({ jobId, bgCount: bgPaths.length, cta: Boolean(ctaPath) });
+    res.json({ jobId, bgCount: bgPaths.length, storyLength: storyText?.length || 0 });
   } catch (err) {
     res.status(500).json({ error: err?.message || String(err) });
   }
