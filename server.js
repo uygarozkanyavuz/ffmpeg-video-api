@@ -1,4 +1,4 @@
-/* server.js */
+/* server.js - PROFESSIONAL WORD SYNC VERSION */
 
 const express = require("express");
 const multer = require("multer");
@@ -45,6 +45,63 @@ async function writeFileSafe(filePath, buffer) {
   await fsp.writeFile(filePath, buffer);
 }
 
+/* ---------------- TTS ---------------- */
+
+async function ttsToWav(text, wavPath) {
+  const response = await openai.audio.speech.create({
+    model: "gpt-4o-mini-tts",
+    voice: "marin",
+    input: text,
+    response_format: "wav",
+  });
+
+  const buf = Buffer.from(await response.arrayBuffer());
+  await writeFileSafe(wavPath, buf);
+}
+
+/* ---------------- WHISPER TRANSCRIBE ---------------- */
+
+async function transcribeWithTimestamps(audioPath) {
+  const transcription = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(audioPath),
+    model: "whisper-1",
+    response_format: "verbose_json",
+    timestamp_granularities: ["word"]
+  });
+
+  return transcription.words; // word-level timestamps
+}
+
+/* ---------------- SRT GENERATION ---------------- */
+
+function secondsToSrtTime(sec) {
+  const date = new Date(sec * 1000);
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
+  return `${hh}:${mm}:${ss},${ms}`;
+}
+
+async function createWordLevelSrt(words, srtPath) {
+  let srt = "";
+  let index = 1;
+
+  words.forEach(word => {
+    if (!word.start || !word.end) return;
+
+    srt += `${index}\n`;
+    srt += `${secondsToSrtTime(word.start)} --> ${secondsToSrtTime(word.end)}\n`;
+    srt += `${word.word}\n\n`;
+
+    index++;
+  });
+
+  await fsp.writeFile(srtPath, srt);
+}
+
+/* ---------------- VIDEO ---------------- */
+
 async function ffprobeDuration(filePath) {
   return new Promise((resolve) => {
     const p = spawn("ffprobe", [
@@ -62,101 +119,10 @@ async function ffprobeDuration(filePath) {
   });
 }
 
-/* ---------------- TTS ---------------- */
-
-async function ttsToWav(text, wavPath) {
-  if (!text || text === "undefined") {
-    throw new Error("storyText is empty or undefined");
-  }
-
-  const response = await openai.audio.speech.create({
-    model: "gpt-4o-mini-tts",
-    voice: "marin",
-    input: text,
-    response_format: "wav",
-  });
-
-  const buf = Buffer.from(await response.arrayBuffer());
-  await writeFileSafe(wavPath, buf);
-}
-
-async function normalizeToWav(inPath, outPath) {
-  await runCmd("ffmpeg", [
-    "-y",
-    "-i", inPath,
-    "-filter:a", "atempo=0.9",
-    "-ar", "48000",
-    "-ac", "1",
-    "-c:a", "pcm_s16le",
-    outPath,
-  ]);
-}
-
-async function wavToM4a(inWav, outM4a) {
-  await runCmd("ffmpeg", [
-    "-y",
-    "-i", inWav,
-    "-c:a", "aac",
-    "-b:a", "192k",
-    outM4a,
-  ]);
-}
-
-/* ---------------- SRT ---------------- */
-
-function secondsToSrtTime(sec) {
-  const date = new Date(sec * 1000);
-  const hh = String(date.getUTCHours()).padStart(2, "0");
-  const mm = String(date.getUTCMinutes()).padStart(2, "0");
-  const ss = String(date.getUTCSeconds()).padStart(2, "0");
-  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
-  return `${hh}:${mm}:${ss},${ms}`;
-}
-
-async function createSrtFile(text, audioDuration, srtPath) {
-
-  const sentences = text
-    .replace(/\n+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  if (!sentences.length) throw new Error("No subtitle sentences found");
-
-  const totalChars = sentences.reduce((sum, s) => sum + s.length, 0);
-
-  let current = 0;
-  let srt = "";
-
-  sentences.forEach((sentence, i) => {
-
-    const ratio = sentence.length / totalChars;
-    const duration = audioDuration * ratio;
-
-    const start = current;
-    const end = current + duration;
-
-    srt += `${i + 1}\n`;
-    srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
-    srt += `${sentence}\n\n`;
-
-    current = end;
-  });
-
-  await fsp.writeFile(srtPath, srt);
-}
-
-/* ---------------- VIDEO ---------------- */
-
-async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
+async function imagesPlusAudio(imagePaths, audioPath, outMp4, srtPath) {
 
   const duration = await ffprobeDuration(audioPath);
   const perImage = duration / imagePaths.length;
-
-  const jobDir = path.dirname(outMp4);
-  const srtPath = path.join(jobDir, "subtitles.srt");
-
-  await createSrtFile(storyText, duration, srtPath);
 
   const args = ["-y"];
 
@@ -182,7 +148,6 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
   const concatRefs = imagePaths.map((_, i) => `[v${i}]`).join("");
   filters.push(`${concatRefs}concat=n=${imagePaths.length}:v=1:a=0[vtmp]`);
 
-  // Daha küçük ve dengeli altyazı
   filters.push(
     `[vtmp]subtitles=${srtPath}:force_style='FontSize=24,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`
   );
@@ -205,19 +170,21 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, storyText) {
 
 async function processJob(jobId, jobDir, bgPaths, storyText) {
   try {
-    const clipsDir = path.join(jobDir, "clips");
-    await fsp.mkdir(clipsDir, { recursive: true });
-
-    const raw = path.join(clipsDir, "tts_raw.wav");
-    const norm = path.join(clipsDir, "tts.wav");
-    const audioM4a = path.join(jobDir, "audio.m4a");
+    const rawAudio = path.join(jobDir, "tts.wav");
+    const srtPath = path.join(jobDir, "subtitles.srt");
     const outMp4 = path.join(jobDir, "output.mp4");
 
-    await ttsToWav(storyText, raw);
-    await normalizeToWav(raw, norm);
-    await wavToM4a(norm, audioM4a);
+    // 1️⃣ TTS
+    await ttsToWav(storyText, rawAudio);
 
-    await imagesPlusAudio(bgPaths, audioM4a, outMp4, storyText);
+    // 2️⃣ Whisper Word-Level Timestamp
+    const words = await transcribeWithTimestamps(rawAudio);
+
+    // 3️⃣ Create Real SRT
+    await createWordLevelSrt(words, srtPath);
+
+    // 4️⃣ Create Video
+    await imagesPlusAudio(bgPaths, rawAudio, outMp4, srtPath);
 
     jobs.set(jobId, {
       status: "done",
@@ -236,10 +203,6 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
 
 app.post("/render10min/start", upload.any(), async (req, res) => {
   try {
-
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "OPENAI_API_KEY missing" });
-    }
 
     const storyText = (req.body?.storyText || "").trim();
     if (!storyText) {
