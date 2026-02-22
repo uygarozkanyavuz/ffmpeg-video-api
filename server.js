@@ -1,4 +1,4 @@
-/* server.js - PROFESSIONAL WORD SYNC + 20% SLOW */
+/* server.js - FIXED 15% SLOW + PERFECT WORD SYNC */
 
 const express = require("express");
 const multer = require("multer");
@@ -13,7 +13,8 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const SLOW_FACTOR = 1.2; // %20 yavaş
+// %15 yavaş (1 / 1.15 ≈ 0.87 ama daha stabil için 0.85 kullanıyoruz)
+const AUDIO_ATEMPO = 0.85;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -90,7 +91,7 @@ async function createWordLevelSrt(words, srtPath) {
   let index = 1;
 
   words.forEach(word => {
-    if (!word.start || !word.end) return;
+    if (word.start == null || word.end == null) return;
 
     srt += `${index}\n`;
     srt += `${secondsToSrtTime(word.start)} --> ${secondsToSrtTime(word.end)}\n`;
@@ -172,31 +173,24 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
     const srtPath = path.join(jobDir, "subtitles.srt");
     const outMp4 = path.join(jobDir, "output.mp4");
 
-    // 1️⃣ TTS
+    // 1️⃣ TTS üret
     await ttsToWav(storyText, rawAudio);
 
-    // 2️⃣ %20 yavaşlat
+    // 2️⃣ %15 yavaşlat (gerçek tempo düşüşü)
     await runCmd("ffmpeg", [
       "-y",
       "-i", rawAudio,
-      "-filter:a", `atempo=${1 / SLOW_FACTOR}`,
+      "-filter:a", `atempo=${AUDIO_ATEMPO}`,
       slowAudio
     ]);
 
     // 3️⃣ Whisper (slow audio)
     const words = await transcribeWithTimestamps(slowAudio);
 
-    // 4️⃣ Timestamp düzelt
-    const adjustedWords = words.map(w => ({
-      ...w,
-      start: w.start * SLOW_FACTOR,
-      end: w.end * SLOW_FACTOR
-    }));
+    // 4️⃣ Gerçek timestamp ile SRT
+    await createWordLevelSrt(words, srtPath);
 
-    // 5️⃣ SRT
-    await createWordLevelSrt(adjustedWords, srtPath);
-
-    // 6️⃣ Video
+    // 5️⃣ Video oluştur
     await imagesPlusAudio(bgPaths, slowAudio, outMp4, srtPath);
 
     jobs.set(jobId, {
