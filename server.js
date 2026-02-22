@@ -376,7 +376,7 @@ async function processJob(jobId, jobDir, bgPaths, plan, ctaPath) {
 
     for (let i = 0; i < plan.segments.length; i++) {
       const s = plan.segments[i];
-      if (!s || !s.arabicAudioUrl || !s.trText) continue;
+     if (!s || !s.trText) continue;
 
       setStage(jobId, `seg_${i + 1}_ar`);
       await addMp3UrlClip(s.arabicAudioUrl, `ayah${s.ayah}_ar`);
