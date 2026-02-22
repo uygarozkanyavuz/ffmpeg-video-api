@@ -1,4 +1,4 @@
-/* server.js - PROFESSIONAL WORD SYNC VERSION */
+/* server.js - PROFESSIONAL WORD SYNC + 20% SLOW */
 
 const express = require("express");
 const multer = require("multer");
@@ -12,6 +12,8 @@ const OpenAI = require("openai");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const SLOW_FACTOR = 1.2; // %20 yavaş
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -59,7 +61,7 @@ async function ttsToWav(text, wavPath) {
   await writeFileSafe(wavPath, buf);
 }
 
-/* ---------------- WHISPER TRANSCRIBE ---------------- */
+/* ---------------- WHISPER ---------------- */
 
 async function transcribeWithTimestamps(audioPath) {
   const transcription = await openai.audio.transcriptions.create({
@@ -69,10 +71,10 @@ async function transcribeWithTimestamps(audioPath) {
     timestamp_granularities: ["word"]
   });
 
-  return transcription.words; // word-level timestamps
+  return transcription.words;
 }
 
-/* ---------------- SRT GENERATION ---------------- */
+/* ---------------- SRT ---------------- */
 
 function secondsToSrtTime(sec) {
   const date = new Date(sec * 1000);
@@ -127,11 +129,7 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, srtPath) {
   const args = ["-y"];
 
   for (const img of imagePaths) {
-    args.push(
-      "-loop", "1",
-      "-t", perImage.toString(),
-      "-i", img
-    );
+    args.push("-loop", "1", "-t", perImage.toString(), "-i", img);
   }
 
   const audioIndex = imagePaths.length;
@@ -140,9 +138,7 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, srtPath) {
   const filters = [];
 
   for (let i = 0; i < imagePaths.length; i++) {
-    filters.push(
-      `[${i}:v]scale=1280:720,setsar=1[v${i}]`
-    );
+    filters.push(`[${i}:v]scale=1280:720,setsar=1[v${i}]`);
   }
 
   const concatRefs = imagePaths.map((_, i) => `[v${i}]`).join("");
@@ -170,21 +166,38 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, srtPath) {
 
 async function processJob(jobId, jobDir, bgPaths, storyText) {
   try {
-    const rawAudio = path.join(jobDir, "tts.wav");
+
+    const rawAudio = path.join(jobDir, "tts_raw.wav");
+    const slowAudio = path.join(jobDir, "tts_slow.wav");
     const srtPath = path.join(jobDir, "subtitles.srt");
     const outMp4 = path.join(jobDir, "output.mp4");
 
     // 1️⃣ TTS
     await ttsToWav(storyText, rawAudio);
 
-    // 2️⃣ Whisper Word-Level Timestamp
-    const words = await transcribeWithTimestamps(rawAudio);
+    // 2️⃣ %20 yavaşlat
+    await runCmd("ffmpeg", [
+      "-y",
+      "-i", rawAudio,
+      "-filter:a", `atempo=${1 / SLOW_FACTOR}`,
+      slowAudio
+    ]);
 
-    // 3️⃣ Create Real SRT
-    await createWordLevelSrt(words, srtPath);
+    // 3️⃣ Whisper (slow audio)
+    const words = await transcribeWithTimestamps(slowAudio);
 
-    // 4️⃣ Create Video
-    await imagesPlusAudio(bgPaths, rawAudio, outMp4, srtPath);
+    // 4️⃣ Timestamp düzelt
+    const adjustedWords = words.map(w => ({
+      ...w,
+      start: w.start * SLOW_FACTOR,
+      end: w.end * SLOW_FACTOR
+    }));
+
+    // 5️⃣ SRT
+    await createWordLevelSrt(adjustedWords, srtPath);
+
+    // 6️⃣ Video
+    await imagesPlusAudio(bgPaths, slowAudio, outMp4, srtPath);
 
     jobs.set(jobId, {
       status: "done",
