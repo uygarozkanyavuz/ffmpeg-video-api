@@ -1,4 +1,4 @@
-/* server.js - FIXED 15% SLOW + PERFECT WORD SYNC */
+/* server.js - STABLE 20% SLOW + FIXED WORD LOSS */
 
 const express = require("express");
 const multer = require("multer");
@@ -13,8 +13,8 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// %15 yavaş (1 / 1.15 ≈ 0.87 ama daha stabil için 0.85 kullanıyoruz)
-const AUDIO_ATEMPO = 0.85;
+// Toplam ~%20 yavaş
+const AUDIO_ATEMPO = 0.80;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -48,7 +48,7 @@ async function writeFileSafe(filePath, buffer) {
   await fsp.writeFile(filePath, buffer);
 }
 
-/* ---------------- TTS ---------------- */
+/* ---------- TTS ---------- */
 
 async function ttsToWav(text, wavPath) {
   const response = await openai.audio.speech.create({
@@ -62,7 +62,7 @@ async function ttsToWav(text, wavPath) {
   await writeFileSafe(wavPath, buf);
 }
 
-/* ---------------- WHISPER ---------------- */
+/* ---------- WHISPER ---------- */
 
 async function transcribeWithTimestamps(audioPath) {
   const transcription = await openai.audio.transcriptions.create({
@@ -72,10 +72,10 @@ async function transcribeWithTimestamps(audioPath) {
     timestamp_granularities: ["word"]
   });
 
-  return transcription.words;
+  return transcription.words || [];
 }
 
-/* ---------------- SRT ---------------- */
+/* ---------- SRT ---------- */
 
 function secondsToSrtTime(sec) {
   const date = new Date(sec * 1000);
@@ -89,21 +89,30 @@ function secondsToSrtTime(sec) {
 async function createWordLevelSrt(words, srtPath) {
   let srt = "";
   let index = 1;
+  let lastEnd = 0;
 
-  words.forEach(word => {
-    if (word.start == null || word.end == null) return;
+  for (const word of words) {
+
+    // Eğer start yoksa son end'den başlat
+    let start = word.start ?? lastEnd;
+    let end = word.end ?? (start + 0.3); // minimum 0.3sn göster
+
+    if (end <= start) {
+      end = start + 0.3;
+    }
 
     srt += `${index}\n`;
-    srt += `${secondsToSrtTime(word.start)} --> ${secondsToSrtTime(word.end)}\n`;
+    srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
     srt += `${word.word}\n\n`;
 
+    lastEnd = end;
     index++;
-  });
+  }
 
   await fsp.writeFile(srtPath, srt);
 }
 
-/* ---------------- VIDEO ---------------- */
+/* ---------- VIDEO ---------- */
 
 async function ffprobeDuration(filePath) {
   return new Promise((resolve) => {
@@ -163,7 +172,7 @@ async function imagesPlusAudio(imagePaths, audioPath, outMp4, srtPath) {
   await runCmd("ffmpeg", args);
 }
 
-/* ---------------- JOB PROCESS ---------------- */
+/* ---------- JOB PROCESS ---------- */
 
 async function processJob(jobId, jobDir, bgPaths, storyText) {
   try {
@@ -173,10 +182,9 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
     const srtPath = path.join(jobDir, "subtitles.srt");
     const outMp4 = path.join(jobDir, "output.mp4");
 
-    // 1️⃣ TTS üret
     await ttsToWav(storyText, rawAudio);
 
-    // 2️⃣ %15 yavaşlat (gerçek tempo düşüşü)
+    // %20 yavaşlat
     await runCmd("ffmpeg", [
       "-y",
       "-i", rawAudio,
@@ -184,13 +192,10 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
       slowAudio
     ]);
 
-    // 3️⃣ Whisper (slow audio)
     const words = await transcribeWithTimestamps(slowAudio);
 
-    // 4️⃣ Gerçek timestamp ile SRT
     await createWordLevelSrt(words, srtPath);
 
-    // 5️⃣ Video oluştur
     await imagesPlusAudio(bgPaths, slowAudio, outMp4, srtPath);
 
     jobs.set(jobId, {
@@ -206,7 +211,7 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
   }
 }
 
-/* ---------------- ROUTES ---------------- */
+/* ---------- ROUTES ---------- */
 
 app.post("/render10min/start", upload.any(), async (req, res) => {
   try {
@@ -244,22 +249,6 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-app.get("/render10min/status/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: "not_found" });
-  res.json(job);
-});
-
-app.get("/render10min/result/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job || job.status !== "done") {
-    return res.status(404).json({ error: "not_ready" });
-  }
-
-  res.setHeader("Content-Type", "video/mp4");
-  fs.createReadStream(job.outputPath).pipe(res);
 });
 
 app.listen(PORT, () => {
