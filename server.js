@@ -82,6 +82,7 @@ async function normalizeToWav(inPath, outPath) {
   await runCmd("ffmpeg", [
     "-y",
     "-i", inPath,
+    "-filter:a", "atempo=0.85",
     "-ar", "48000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
