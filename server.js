@@ -1,4 +1,4 @@
-/* server.js - FINAL STABLE VERSION */
+/* server.js - SENTENCE LEVEL SUBTITLE VERSION */
 
 const express = require("express");
 const multer = require("multer");
@@ -64,17 +64,17 @@ async function ttsToWav(text, wavPath) {
   await writeFileSafe(wavPath, buf);
 }
 
-/* ---------------- WHISPER ---------------- */
+/* ---------------- WHISPER (SENTENCE LEVEL) ---------------- */
 
 async function transcribeWithTimestamps(audioPath) {
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
     model: "whisper-1",
-    response_format: "verbose_json",
-    timestamp_granularities: ["word"]
+    response_format: "verbose_json"
+    // word granularities kaldırıldı
   });
 
-  return transcription.words || [];
+  return transcription.segments || [];
 }
 
 /* ---------------- SRT ---------------- */
@@ -88,24 +88,24 @@ function secondsToSrtTime(sec) {
   return `${hh}:${mm}:${ss},${ms}`;
 }
 
-async function createWordLevelSrt(words, srtPath) {
+async function createSentenceLevelSrt(segments, srtPath) {
   let srt = "";
   let index = 1;
-  let lastEnd = 0;
 
-  for (const word of words) {
-    let start = word.start ?? lastEnd;
-    let end = word.end ?? (start + 0.3);
+  for (const segment of segments) {
+    let start = segment.start;
+    let end = segment.end;
 
-    if (end <= start) {
-      end = start + 0.3;
-    }
+    if (!start && start !== 0) continue;
+    if (!end || end <= start) end = start + 1;
+
+    const text = (segment.text || "").trim();
+    if (!text) continue;
 
     srt += `${index}\n`;
     srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
-    srt += `${word.word}\n\n`;
+    srt += `${text}\n\n`;
 
-    lastEnd = end;
     index++;
   }
 
@@ -191,9 +191,9 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
       slowAudio
     ]);
 
-    const words = await transcribeWithTimestamps(slowAudio);
+    const segments = await transcribeWithTimestamps(slowAudio);
 
-    await createWordLevelSrt(words, srtPath);
+    await createSentenceLevelSrt(segments, srtPath);
 
     await imagesPlusAudio(bgPaths, slowAudio, outMp4, srtPath);
 
@@ -263,6 +263,7 @@ app.get("/render10min/status/:jobId", (req, res) => {
 /* RESULT */
 
 app.get("/render10min/result/:jobId", (req, res) => {
+
   const job = jobs.get(req.params.jobId);
 
   if (!job || job.status !== "done") {
