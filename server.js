@@ -1,8 +1,6 @@
-
-/* server.js - SENTENCE LEVEL SUBTITLE VERSION */
+/* server.js - SENTENCE LEVEL SUBTITLE VERSION (FIXED SINGLE IMAGE) */
 
 const express = require("express");
-const multer = require("multer");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
@@ -14,16 +12,16 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.json({ limit: "10mb" }));
+
 // Yaklaşık %20 yavaş
 const AUDIO_ATEMPO = 0.80;
 
+// SABİT GÖRSEL
+const FIXED_IMAGE_PATH = path.join(__dirname, "assets", "sabit.png");
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-});
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
 });
 
 const jobs = new Map();
@@ -38,7 +36,9 @@ function runCmd(bin, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(bin, args);
     let err = "";
+
     p.stderr.on("data", (d) => (err += d.toString()));
+
     p.on("close", (code) => {
       if (code === 0) resolve();
       else reject(new Error(err));
@@ -65,14 +65,13 @@ async function ttsToWav(text, wavPath) {
   await writeFileSafe(wavPath, buf);
 }
 
-/* ---------------- WHISPER (SENTENCE LEVEL) ---------------- */
+/* ---------------- WHISPER ---------------- */
 
 async function transcribeWithTimestamps(audioPath) {
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
     model: "whisper-1",
-    response_format: "verbose_json"
-    // word granularities kaldırıldı
+    response_format: "verbose_json",
   });
 
   return transcription.segments || [];
@@ -97,7 +96,7 @@ async function createSentenceLevelSrt(segments, srtPath) {
     let start = segment.start;
     let end = segment.end;
 
-    if (!start && start !== 0) continue;
+    if (start === undefined) continue;
     if (!end || end <= start) end = start + 1;
 
     const text = (segment.text || "").trim();
@@ -125,59 +124,43 @@ async function ffprobeDuration(filePath) {
     ]);
 
     let out = "";
+
     p.stdout.on("data", (d) => (out += d.toString()));
+
     p.on("close", () => {
       resolve(Number(out.trim()) || 0);
     });
   });
 }
 
-async function imagesPlusAudio(imagePaths, audioPath, outMp4, srtPath) {
-
+async function imagePlusAudio(imagePath, audioPath, outMp4, srtPath) {
   const duration = await ffprobeDuration(audioPath);
-  const perImage = duration / imagePaths.length;
 
-  const args = ["-y"];
-
-  for (const img of imagePaths) {
-    args.push("-loop", "1", "-t", perImage.toString(), "-i", img);
-  }
-
-  const audioIndex = imagePaths.length;
-  args.push("-i", audioPath);
-
-  const filters = [];
-
-  for (let i = 0; i < imagePaths.length; i++) {
-    filters.push(`[${i}:v]scale=1280:720,setsar=1[v${i}]`);
-  }
-
-  const concatRefs = imagePaths.map((_, i) => `[v${i}]`).join("");
-  filters.push(`${concatRefs}concat=n=${imagePaths.length}:v=1:a=0[vtmp]`);
-
-  filters.push(
-    `[vtmp]subtitles=${srtPath}:force_style='FontSize=24,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`
-  );
-
-  args.push(
-    "-filter_complex", filters.join(";"),
+  const args = [
+    "-y",
+    "-loop", "1",
+    "-t", duration.toString(),
+    "-i", imagePath,
+    "-i", audioPath,
+    "-filter_complex",
+    `[0:v]scale=1280:720,setsar=1[v0];` +
+    `[v0]subtitles=${srtPath}:force_style='FontSize=24,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
     "-map", "[vout]",
-    "-map", `${audioIndex}:a`,
+    "-map", "1:a",
     "-c:v", "libx264",
     "-pix_fmt", "yuv420p",
     "-c:a", "aac",
     "-shortest",
     outMp4
-  );
+  ];
 
   await runCmd("ffmpeg", args);
 }
 
 /* ---------------- JOB PROCESS ---------------- */
 
-async function processJob(jobId, jobDir, bgPaths, storyText) {
+async function processJob(jobId, jobDir, storyText) {
   try {
-
     const rawAudio = path.join(jobDir, "tts_raw.wav");
     const slowAudio = path.join(jobDir, "tts_slow.wav");
     const srtPath = path.join(jobDir, "subtitles.srt");
@@ -193,10 +176,9 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
     ]);
 
     const segments = await transcribeWithTimestamps(slowAudio);
-
     await createSentenceLevelSrt(segments, srtPath);
 
-    await imagesPlusAudio(bgPaths, slowAudio, outMp4, srtPath);
+    await imagePlusAudio(FIXED_IMAGE_PATH, slowAudio, outMp4, srtPath);
 
     jobs.set(jobId, {
       status: "done",
@@ -213,35 +195,28 @@ async function processJob(jobId, jobDir, bgPaths, storyText) {
 
 /* ---------------- ROUTES ---------------- */
 
-app.post("/render10min/start", upload.any(), async (req, res) => {
+app.post("/render10min/start", async (req, res) => {
   try {
-
     const storyText = (req.body?.storyText || "").trim();
+
     if (!storyText) {
       return res.status(400).json({ error: "storyText missing" });
     }
 
-    const files = Array.isArray(req.files) ? req.files : [];
-    if (!files.length) {
-      return res.status(400).json({ error: "No image uploaded" });
+    // Sabit görsel kontrol
+    if (!fs.existsSync(FIXED_IMAGE_PATH)) {
+      return res.status(500).json({ error: "sabit.png not found in assets folder" });
     }
 
     const jobId = uid();
     const jobDir = path.join(os.tmpdir(), `job_${jobId}`);
+
     await fsp.mkdir(jobDir, { recursive: true });
-
-    const bgPaths = [];
-
-    for (let i = 0; i < files.length; i++) {
-      const p = path.join(jobDir, `bg_${i + 1}.png`);
-      await writeFileSafe(p, files[i].buffer);
-      bgPaths.push(p);
-    }
 
     jobs.set(jobId, { status: "processing" });
 
     setImmediate(() =>
-      processJob(jobId, jobDir, bgPaths, storyText)
+      processJob(jobId, jobDir, storyText)
     );
 
     res.json({ jobId });
@@ -252,19 +227,18 @@ app.post("/render10min/start", upload.any(), async (req, res) => {
 });
 
 /* STATUS */
-
 app.get("/render10min/status/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
+
   if (!job) {
     return res.status(404).json({ error: "not_found" });
   }
+
   res.json(job);
 });
 
 /* RESULT */
-
 app.get("/render10min/result/:jobId", (req, res) => {
-
   const job = jobs.get(req.params.jobId);
 
   if (!job || job.status !== "done") {
@@ -278,4 +252,3 @@ app.get("/render10min/result/:jobId", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
-
