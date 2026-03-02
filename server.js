@@ -1,4 +1,4 @@
-/* server.js - FIXED IMAGE + FORM-DATA SUPPORT */
+/* server.js - FIXED IMAGE + SAFE VERSION */
 
 const express = require("express");
 const multer = require("multer");
@@ -13,16 +13,14 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ---------------- BODY LIMIT 50MB ---------------- */
+/* ---------------- BODY LIMIT ---------------- */
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+// Railway reverse proxy ile çakışmaması için 100mb
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ extended: true, limit: "100mb" }));
 
-// ⚠️ multipart/form-data için gerekli
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
-});
+// multipart desteği (file yok ama form-data için gerekli)
+const upload = multer();
 
 /* ---------------- SETTINGS ---------------- */
 
@@ -44,8 +42,8 @@ function uid() {
 function runCmd(bin, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(bin, args);
-    let err = "";
 
+    let err = "";
     p.stderr.on("data", (d) => (err += d.toString()));
 
     p.on("close", (code) => {
@@ -65,8 +63,8 @@ async function ttsToWav(text, wavPath) {
     response_format: "wav",
   });
 
-  const buf = Buffer.from(await response.arrayBuffer());
-  await fsp.writeFile(wavPath, buf);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  await fsp.writeFile(wavPath, buffer);
 }
 
 /* ---------------- WHISPER ---------------- */
@@ -107,6 +105,7 @@ async function createSentenceLevelSrt(segments, srtPath) {
     srt += `${index}\n`;
     srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
     srt += `${text}\n\n`;
+
     index++;
   }
 
@@ -133,6 +132,9 @@ async function ffprobeDuration(filePath) {
 async function imagePlusAudio(imagePath, audioPath, outMp4, srtPath) {
   const duration = await ffprobeDuration(audioPath);
 
+  // Linux path escape (subtitles için önemli)
+  const safeSrtPath = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+
   const args = [
     "-y",
     "-loop", "1",
@@ -141,7 +143,7 @@ async function imagePlusAudio(imagePath, audioPath, outMp4, srtPath) {
     "-i", audioPath,
     "-filter_complex",
     `[0:v]scale=1280:720,setsar=1[v0];` +
-    `[v0]subtitles=${srtPath}:force_style='FontSize=26,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
+    `[v0]subtitles=${safeSrtPath}:force_style='FontSize=26,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
     "-map", "[vout]",
     "-map", "1:a",
     "-c:v", "libx264",
@@ -188,8 +190,6 @@ async function processJob(jobId, jobDir, storyText) {
 
 app.post("/render10min/start", upload.none(), async (req, res) => {
   try {
-    console.log("BODY:", req.body);
-
     const storyText = (req.body?.storyText || "").trim();
 
     if (!storyText) {
@@ -206,9 +206,7 @@ app.post("/render10min/start", upload.none(), async (req, res) => {
 
     jobs.set(jobId, { status: "processing" });
 
-    setImmediate(() =>
-      processJob(jobId, jobDir, storyText)
-    );
+    setImmediate(() => processJob(jobId, jobDir, storyText));
 
     res.json({ jobId });
 
