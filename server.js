@@ -1,6 +1,7 @@
-/* server.js - SENTENCE LEVEL SUBTITLE VERSION (FIXED IMAGE + 50MB BODY) */
+/* server.js - FIXED IMAGE + FORM-DATA SUPPORT */
 
 const express = require("express");
+const multer = require("multer");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
@@ -16,6 +17,12 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// ⚠️ multipart/form-data için gerekli
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
 
 /* ---------------- SETTINGS ---------------- */
 
@@ -48,11 +55,6 @@ function runCmd(bin, args) {
   });
 }
 
-async function writeFileSafe(filePath, buffer) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  await fsp.writeFile(filePath, buffer);
-}
-
 /* ---------------- TTS ---------------- */
 
 async function ttsToWav(text, wavPath) {
@@ -64,7 +66,7 @@ async function ttsToWav(text, wavPath) {
   });
 
   const buf = Buffer.from(await response.arrayBuffer());
-  await writeFileSafe(wavPath, buf);
+  await fsp.writeFile(wavPath, buf);
 }
 
 /* ---------------- WHISPER ---------------- */
@@ -95,19 +97,16 @@ async function createSentenceLevelSrt(segments, srtPath) {
   let index = 1;
 
   for (const segment of segments) {
-    let start = segment.start;
-    let end = segment.end;
+    if (segment.start === undefined) continue;
 
-    if (start === undefined) continue;
-    if (!end || end <= start) end = start + 1;
-
+    const start = segment.start;
+    const end = segment.end > start ? segment.end : start + 1;
     const text = (segment.text || "").trim();
     if (!text) continue;
 
     srt += `${index}\n`;
     srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
     srt += `${text}\n\n`;
-
     index++;
   }
 
@@ -126,12 +125,8 @@ async function ffprobeDuration(filePath) {
     ]);
 
     let out = "";
-
     p.stdout.on("data", (d) => (out += d.toString()));
-
-    p.on("close", () => {
-      resolve(Number(out.trim()) || 0);
-    });
+    p.on("close", () => resolve(Number(out.trim()) || 0));
   });
 }
 
@@ -146,7 +141,7 @@ async function imagePlusAudio(imagePath, audioPath, outMp4, srtPath) {
     "-i", audioPath,
     "-filter_complex",
     `[0:v]scale=1280:720,setsar=1[v0];` +
-    `[v0]subtitles=${srtPath}:force_style='FontSize=24,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
+    `[v0]subtitles=${srtPath}:force_style='FontSize=26,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
     "-map", "[vout]",
     "-map", "1:a",
     "-c:v", "libx264",
@@ -182,22 +177,16 @@ async function processJob(jobId, jobDir, storyText) {
 
     await imagePlusAudio(FIXED_IMAGE_PATH, slowAudio, outMp4, srtPath);
 
-    jobs.set(jobId, {
-      status: "done",
-      outputPath: outMp4,
-    });
+    jobs.set(jobId, { status: "done", outputPath: outMp4 });
 
   } catch (err) {
-    jobs.set(jobId, {
-      status: "error",
-      error: err.message,
-    });
+    jobs.set(jobId, { status: "error", error: err.message });
   }
 }
 
 /* ---------------- ROUTES ---------------- */
 
-app.post("/render10min/start", async (req, res) => {
+app.post("/render10min/start", upload.none(), async (req, res) => {
   try {
     console.log("BODY:", req.body);
 
@@ -213,7 +202,6 @@ app.post("/render10min/start", async (req, res) => {
 
     const jobId = uid();
     const jobDir = path.join(os.tmpdir(), `job_${jobId}`);
-
     await fsp.mkdir(jobDir, { recursive: true });
 
     jobs.set(jobId, { status: "processing" });
@@ -232,18 +220,13 @@ app.post("/render10min/start", async (req, res) => {
 /* STATUS */
 app.get("/render10min/status/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
-
-  if (!job) {
-    return res.status(404).json({ error: "not_found" });
-  }
-
+  if (!job) return res.status(404).json({ error: "not_found" });
   res.json(job);
 });
 
 /* RESULT */
 app.get("/render10min/result/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
-
   if (!job || job.status !== "done") {
     return res.status(404).json({ error: "not_ready" });
   }
