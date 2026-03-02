@@ -1,4 +1,4 @@
-/* server.js - SENTENCE LEVEL SUBTITLE VERSION (FIXED SINGLE IMAGE) */
+/* server.js - SENTENCE LEVEL SUBTITLE VERSION (FIXED IMAGE + 50MB BODY) */
 
 const express = require("express");
 const path = require("path");
@@ -12,12 +12,14 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "10mb" }));
+/* ---------------- BODY LIMIT 50MB ---------------- */
 
-// Yaklaşık %20 yavaş
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+/* ---------------- SETTINGS ---------------- */
+
 const AUDIO_ATEMPO = 0.80;
-
-// SABİT GÖRSEL
 const FIXED_IMAGE_PATH = path.join(__dirname, "assets", "sabit.png");
 
 const openai = new OpenAI({
@@ -197,15 +199,16 @@ async function processJob(jobId, jobDir, storyText) {
 
 app.post("/render10min/start", async (req, res) => {
   try {
+    console.log("BODY:", req.body);
+
     const storyText = (req.body?.storyText || "").trim();
 
     if (!storyText) {
       return res.status(400).json({ error: "storyText missing" });
     }
 
-    // Sabit görsel kontrol
     if (!fs.existsSync(FIXED_IMAGE_PATH)) {
-      return res.status(500).json({ error: "sabit.png not found in assets folder" });
+      return res.status(500).json({ error: "assets/sabit.png not found" });
     }
 
     const jobId = uid();
