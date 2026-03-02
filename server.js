@@ -27,7 +27,7 @@ const upload = multer({
 /* ---------------- SETTINGS ---------------- */
 
 const AUDIO_ATEMPO = 0.80;
-const FIXED_IMAGE_PATH = path.join(__dirname, "assets", "sabit.png");
+const FIXED_IMAGE_PATH = path.join(__dirname, "assets", "sabit.jpg");
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -197,7 +197,7 @@ app.post("/render10min/start", upload.none(), async (req, res) => {
     }
 
     if (!fs.existsSync(FIXED_IMAGE_PATH)) {
-      return res.status(500).json({ error: "assets/sabit.png not found" });
+      return res.status(500).json({ error: "assets/sabit.jpg not found" });
     }
 
     const jobId = uid();
