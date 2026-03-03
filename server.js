@@ -86,9 +86,9 @@ app.post("/render10min/start", async (req, res) => {
     const jobDir = path.join(os.tmpdir(), `render_${jobId}`);
     await fsp.mkdir(jobDir, { recursive: true });
 
-    const imagePath = path.join(process.cwd(), "assets", "sabit.png");
+    const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
     if (!fs.existsSync(imagePath)) {
-      return res.status(400).json({ error: "assets/sabit.png not found" });
+      return res.status(400).json({ error: "assets/sabit.jpg not found" });
     }
 
     jobs.set(jobId, { status: "processing" });
