@@ -10,7 +10,7 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "100mb" }));
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error("OPENAI_API_KEY missing");
