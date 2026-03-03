@@ -22,13 +22,6 @@ const openai = new OpenAI({
 
 const jobs = new Map();
 
-/* ---------------- SETTINGS ---------------- */
-
-const AUDIO_ATEMPO = 0.80;
-const FIXED_IMAGE_PATH = path.join(process.cwd(), "assets", "sabit.jpg");
-
-/* ---------------- UTIL ---------------- */
-
 function uid() {
   return crypto.randomUUID
     ? crypto.randomUUID()
@@ -159,7 +152,8 @@ app.post("/render10min/start", async (req, res) => {
       return res.status(400).json({ error: "Missing text field" });
     }
 
-    if (!fs.existsSync(FIXED_IMAGE_PATH)) {
+    const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
+    if (!fs.existsSync(imagePath)) {
       return res.status(400).json({ error: "assets/sabit.jpg not found" });
     }
 
@@ -171,31 +165,21 @@ app.post("/render10min/start", async (req, res) => {
 
     setImmediate(async () => {
       try {
-        const rawWav = path.join(jobDir, "audio_raw.wav");
-        const slowWav = path.join(jobDir, "audio_slow.wav");
+        const wavPath = path.join(jobDir, "audio.wav");
         const srtPath = path.join(jobDir, "subtitles.srt");
         const mp4Path = path.join(jobDir, "output.mp4");
 
-        await ttsToWav(req.body.text, rawWav);
+        await ttsToWav(req.body.text, wavPath);
 
-        // 🔥 SESİ YAVAŞLAT
-        await runCmd("ffmpeg", [
-          "-y",
-          "-i", rawWav,
-          "-filter:a", `atempo=${AUDIO_ATEMPO}`,
-          slowWav
-        ]);
-
-        const segments = await transcribeWithTimestamps(slowWav);
+        const segments = await transcribeWithTimestamps(wavPath);
         await createSentenceLevelSrt(segments, srtPath);
 
-        await imagesPlusAudioToMp4(FIXED_IMAGE_PATH, slowWav, mp4Path, srtPath);
+        await imagesPlusAudioToMp4(imagePath, wavPath, mp4Path, srtPath);
 
         jobs.set(jobId, {
           status: "done",
           outputPath: mp4Path,
         });
-
       } catch (err) {
         jobs.set(jobId, {
           status: "error",
@@ -205,7 +189,6 @@ app.post("/render10min/start", async (req, res) => {
     });
 
     res.json({ jobId });
-
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
