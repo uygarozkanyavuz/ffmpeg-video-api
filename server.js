@@ -30,7 +30,7 @@ function uid() {
 
 function runCmd(bin, args) {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(bin, args);
 
     let err = "";
     p.stderr.on("data", (d) => (err += d.toString()));
@@ -41,6 +41,8 @@ function runCmd(bin, args) {
     });
   });
 }
+
+/* ---------------- TTS ---------------- */
 
 async function ttsToWav(text, wavPath) {
   const resp = await openai.audio.speech.create({
@@ -54,27 +56,95 @@ async function ttsToWav(text, wavPath) {
   await fsp.writeFile(wavPath, buf);
 }
 
-async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4) {
-  const W = 1280;
-  const H = 720;
-  const fps = 30;
+/* ---------------- WHISPER ---------------- */
+
+async function transcribeWithTimestamps(audioPath) {
+  const transcription = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(audioPath),
+    model: "whisper-1",
+    response_format: "verbose_json",
+  });
+
+  return transcription.segments || [];
+}
+
+/* ---------------- SRT ---------------- */
+
+function secondsToSrtTime(sec) {
+  const date = new Date(sec * 1000);
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
+  return `${hh}:${mm}:${ss},${ms}`;
+}
+
+async function createSentenceLevelSrt(segments, srtPath) {
+  let srt = "";
+  let index = 1;
+
+  for (const segment of segments) {
+    if (segment.start === undefined) continue;
+
+    const start = segment.start;
+    const end = segment.end > start ? segment.end : start + 1;
+    const text = (segment.text || "").trim();
+    if (!text) continue;
+
+    srt += `${index}\n`;
+    srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
+    srt += `${text}\n\n`;
+
+    index++;
+  }
+
+  await fsp.writeFile(srtPath, srt);
+}
+
+/* ---------------- VIDEO ---------------- */
+
+async function ffprobeDuration(filePath) {
+  return new Promise((resolve) => {
+    const p = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ]);
+
+    let out = "";
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.on("close", () => resolve(Number(out.trim()) || 0));
+  });
+}
+
+async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, srtPath) {
+  const duration = await ffprobeDuration(audioPath);
+  const safeSrtPath = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 
   await runCmd("ffmpeg", [
     "-y",
     "-loop", "1",
+    "-t", duration.toString(),
     "-i", imagePath,
     "-i", audioPath,
+    "-filter_complex",
+    `[0:v]scale=1280:720,setsar=1[v0];` +
+    `[v0]subtitles=${safeSrtPath}:force_style='FontSize=28,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
+    "-map", "[vout]",
+    "-map", "1:a",
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-tune", "stillimage",
     "-pix_fmt", "yuv420p",
-    "-vf", `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`,
     "-c:a", "aac",
     "-b:a", "128k",
     "-shortest",
-    outMp4,
+    outMp4
   ]);
 }
+
+/* ---------------- ROUTE ---------------- */
 
 app.post("/render10min/start", async (req, res) => {
   try {
@@ -82,24 +152,29 @@ app.post("/render10min/start", async (req, res) => {
       return res.status(400).json({ error: "Missing text field" });
     }
 
-    const jobId = uid();
-    const jobDir = path.join(os.tmpdir(), `render_${jobId}`);
-    await fsp.mkdir(jobDir, { recursive: true });
-
     const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
     if (!fs.existsSync(imagePath)) {
       return res.status(400).json({ error: "assets/sabit.jpg not found" });
     }
+
+    const jobId = uid();
+    const jobDir = path.join(os.tmpdir(), `render_${jobId}`);
+    await fsp.mkdir(jobDir, { recursive: true });
 
     jobs.set(jobId, { status: "processing" });
 
     setImmediate(async () => {
       try {
         const wavPath = path.join(jobDir, "audio.wav");
+        const srtPath = path.join(jobDir, "subtitles.srt");
         const mp4Path = path.join(jobDir, "output.mp4");
 
         await ttsToWav(req.body.text, wavPath);
-        await imagesPlusAudioToMp4(imagePath, wavPath, mp4Path);
+
+        const segments = await transcribeWithTimestamps(wavPath);
+        await createSentenceLevelSrt(segments, srtPath);
+
+        await imagesPlusAudioToMp4(imagePath, wavPath, mp4Path, srtPath);
 
         jobs.set(jobId, {
           status: "done",
@@ -119,12 +194,14 @@ app.post("/render10min/start", async (req, res) => {
   }
 });
 
+/* STATUS */
 app.get("/render10min/status/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "job_not_found" });
   res.json(job);
 });
 
+/* RESULT */
 app.get("/render10min/result/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job || job.status !== "done") {
