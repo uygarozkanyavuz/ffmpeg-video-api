@@ -98,7 +98,7 @@ PlayResY: 720
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Times New Roman,48,&H00FFFFFF,&H0000AA00,&H00000000,&H00000000,0,0,1,2,0,2,10,10,40,1
+Style: Default,Montserrat,56,&H00FFFFFF,&H0000FF00,&H00000000,&H00000000,1,0,1,4,0,2,10,10,60,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -293,6 +293,5 @@ app.get("/render10min/result/:jobId", async (req,res)=>{
 });
 
 app.listen(PORT,()=>{
-
   console.log("Server running on port "+PORT);
 });
