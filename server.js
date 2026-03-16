@@ -20,7 +20,11 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const jobs = new Map();
+const JOB_ROOT = path.join(os.tmpdir(), "render_jobs");
+
+async function ensureDir(dir) {
+  await fsp.mkdir(dir, { recursive: true });
+}
 
 function uid() {
   return crypto.randomUUID
@@ -172,7 +176,7 @@ async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
   ]);
 }
 
-/* ---------------- ROUTE ---------------- */
+/* ---------------- ROUTES ---------------- */
 
 app.post("/render10min/start", async (req, res) => {
   try {
@@ -180,14 +184,21 @@ app.post("/render10min/start", async (req, res) => {
       return res.status(400).json({ error: "Missing text field" });
     }
 
-    const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
+    await ensureDir(JOB_ROOT);
 
     const jobId = uid();
-    const jobDir = path.join(os.tmpdir(), `render_${jobId}`);
+    const jobDir = path.join(JOB_ROOT, jobId);
 
-    await fsp.mkdir(jobDir, { recursive: true });
+    await ensureDir(jobDir);
 
-    jobs.set(jobId, { status: "processing" });
+    const statusFile = path.join(jobDir, "status.json");
+
+    await fsp.writeFile(
+      statusFile,
+      JSON.stringify({ status: "processing" })
+    );
+
+    const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
 
     setImmediate(async () => {
       try {
@@ -206,15 +217,21 @@ app.post("/render10min/start", async (req, res) => {
 
         await imagesPlusAudioToMp4(imagePath, slowPath, mp4Path, assPath);
 
-        jobs.set(jobId, {
-          status: "done",
-          outputPath: mp4Path,
-        });
+        await fsp.writeFile(
+          statusFile,
+          JSON.stringify({
+            status: "done",
+            outputPath: mp4Path,
+          })
+        );
       } catch (err) {
-        jobs.set(jobId, {
-          status: "error",
-          error: err.message,
-        });
+        await fsp.writeFile(
+          statusFile,
+          JSON.stringify({
+            status: "error",
+            error: err.message,
+          })
+        );
       }
     });
 
@@ -226,23 +243,44 @@ app.post("/render10min/start", async (req, res) => {
 
 /* STATUS */
 
-app.get("/render10min/status/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: "job_not_found" });
-  res.json(job);
+app.get("/render10min/status/:jobId", async (req, res) => {
+  try {
+    const jobDir = path.join(JOB_ROOT, req.params.jobId);
+    const statusFile = path.join(jobDir, "status.json");
+
+    if (!fs.existsSync(statusFile)) {
+      return res.status(404).json({ error: "job_not_found" });
+    }
+
+    const data = JSON.parse(await fsp.readFile(statusFile));
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* RESULT */
 
-app.get("/render10min/result/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
+app.get("/render10min/result/:jobId", async (req, res) => {
+  try {
+    const jobDir = path.join(JOB_ROOT, req.params.jobId);
+    const statusFile = path.join(jobDir, "status.json");
 
-  if (!job || job.status !== "done") {
-    return res.status(404).json({ error: "not_ready" });
+    if (!fs.existsSync(statusFile)) {
+      return res.status(404).json({ error: "job_not_found" });
+    }
+
+    const status = JSON.parse(await fsp.readFile(statusFile));
+
+    if (status.status !== "done") {
+      return res.status(404).json({ error: "not_ready" });
+    }
+
+    res.setHeader("Content-Type", "video/mp4");
+    fs.createReadStream(status.outputPath).pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.setHeader("Content-Type", "video/mp4");
-  fs.createReadStream(job.outputPath).pipe(res);
 });
 
 app.listen(PORT, () => {
