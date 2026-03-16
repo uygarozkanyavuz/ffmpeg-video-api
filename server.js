@@ -22,6 +22,8 @@ const openai = new OpenAI({
 
 const JOB_ROOT = path.join(os.tmpdir(), "render_jobs");
 
+/* ---------------- UTIL ---------------- */
+
 async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
 }
@@ -85,9 +87,10 @@ async function transcribe(audioPath) {
   return transcription.segments || [];
 }
 
-/* ---------------- ASS SUBTITLE ---------------- */
+/* ---------------- ASS KARAOKE SUBTITLES ---------------- */
 
-async function createAssSubtitles(segments, assPath) {
+async function createKaraokeAss(segments, assPath) {
+
   let ass = `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -95,24 +98,39 @@ PlayResY: 720
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Arial,36,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,0,0,1,2,0,2,10,10,40,1
+Style: Default,Arial,42,&H00FFFFFF,&H00FF0000,&H00000000,&H00000000,0,0,1,2,0,2,10,10,40,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 `;
 
   for (const seg of segments) {
+
     const start = secondsToAss(seg.start);
     const end = secondsToAss(seg.end);
-    const text = seg.text.trim();
 
-    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}\n`;
+    const words = seg.text.trim().split(" ");
+
+    const duration = seg.end - seg.start;
+    const perWord = duration / words.length;
+
+    let karaoke = "";
+
+    for (const word of words) {
+
+      const k = Math.floor(perWord * 100);
+
+      karaoke += `{\\k${k}}${word} `;
+    }
+
+    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${karaoke.trim()}\n`;
   }
 
   await fsp.writeFile(assPath, ass);
 }
 
 function secondsToAss(sec) {
+
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = (sec % 60).toFixed(2);
@@ -123,166 +141,161 @@ function secondsToAss(sec) {
 /* ---------------- VIDEO ---------------- */
 
 async function ffprobeDuration(filePath) {
+
   return new Promise((resolve) => {
+
     const p = spawn("ffprobe", [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-      filePath,
+      "-v","error",
+      "-show_entries","format=duration",
+      "-of","default=noprint_wrappers=1:nokey=1",
+      filePath
     ]);
 
     let out = "";
-    p.stdout.on("data", (d) => (out += d.toString()));
-    p.on("close", () => resolve(Number(out.trim()) || 0));
+
+    p.stdout.on("data",(d)=> out += d.toString());
+
+    p.on("close",()=> resolve(Number(out.trim()) || 0));
   });
 }
 
 async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
+
   const duration = await ffprobeDuration(audioPath);
 
   await runCmd("ffmpeg", [
+
     "-y",
-    "-loop",
-    "1",
-    "-t",
-    duration.toString(),
-    "-i",
-    imagePath,
-    "-i",
-    audioPath,
-    "-vf",
-    `scale=1280:720,ass=${assPath}`,
-    "-map",
-    "0:v",
-    "-map",
-    "1:a",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "veryfast",
-    "-tune",
-    "stillimage",
-    "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "128k",
+
+    "-loop","1",
+    "-t",duration.toString(),
+
+    "-i",imagePath,
+    "-i",audioPath,
+
+    "-vf",`scale=1280:720,ass=${assPath}`,
+
+    "-map","0:v",
+    "-map","1:a",
+
+    "-c:v","libx264",
+    "-preset","veryfast",
+    "-tune","stillimage",
+    "-pix_fmt","yuv420p",
+
+    "-c:a","aac",
+    "-b:a","128k",
+
     "-shortest",
-    outMp4,
+
+    outMp4
   ]);
 }
 
 /* ---------------- ROUTES ---------------- */
 
-app.post("/render10min/start", async (req, res) => {
-  try {
-    if (!req.body?.text) {
-      return res.status(400).json({ error: "Missing text field" });
+app.post("/render10min/start", async (req,res)=>{
+
+  try{
+
+    if(!req.body?.text){
+
+      return res.status(400).json({error:"Missing text"});
     }
 
     await ensureDir(JOB_ROOT);
 
     const jobId = uid();
-    const jobDir = path.join(JOB_ROOT, jobId);
+
+    const jobDir = path.join(JOB_ROOT,jobId);
 
     await ensureDir(jobDir);
 
-    const statusFile = path.join(jobDir, "status.json");
+    const statusFile = path.join(jobDir,"status.json");
 
-    await fsp.writeFile(
-      statusFile,
-      JSON.stringify({ status: "processing" })
-    );
+    await fsp.writeFile(statusFile,JSON.stringify({status:"processing"}));
 
-    const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
+    const imagePath = path.join(process.cwd(),"assets","sabit.jpg");
 
-    setImmediate(async () => {
-      try {
-        const wavPath = path.join(jobDir, "audio.wav");
-        const slowPath = path.join(jobDir, "audio_slow.wav");
-        const assPath = path.join(jobDir, "subtitles.ass");
-        const mp4Path = path.join(jobDir, "output.mp4");
+    setImmediate(async()=>{
 
-        await ttsToWav(req.body.text, wavPath);
+      try{
 
-        await slowAudio(wavPath, slowPath);
+        const wavPath = path.join(jobDir,"audio.wav");
+        const slowPath = path.join(jobDir,"audio_slow.wav");
+        const assPath = path.join(jobDir,"subtitles.ass");
+        const mp4Path = path.join(jobDir,"output.mp4");
+
+        await ttsToWav(req.body.text,wavPath);
+
+        await slowAudio(wavPath,slowPath);
 
         const segments = await transcribe(slowPath);
 
-        await createAssSubtitles(segments, assPath);
+        await createKaraokeAss(segments,assPath);
 
-        await imagesPlusAudioToMp4(imagePath, slowPath, mp4Path, assPath);
+        await imagesPlusAudioToMp4(imagePath,slowPath,mp4Path,assPath);
 
-        await fsp.writeFile(
-          statusFile,
-          JSON.stringify({
-            status: "done",
-            outputPath: mp4Path,
-          })
-        );
-      } catch (err) {
-        await fsp.writeFile(
-          statusFile,
-          JSON.stringify({
-            status: "error",
-            error: err.message,
-          })
-        );
+        await fsp.writeFile(statusFile,JSON.stringify({
+          status:"done",
+          outputPath:mp4Path
+        }));
+
+      }catch(err){
+
+        await fsp.writeFile(statusFile,JSON.stringify({
+          status:"error",
+          error:err.message
+        }));
       }
+
     });
 
-    res.json({ jobId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json({jobId});
+
+  }catch(err){
+
+    res.status(500).json({error:err.message});
   }
+
 });
 
 /* STATUS */
 
-app.get("/render10min/status/:jobId", async (req, res) => {
-  try {
-    const jobDir = path.join(JOB_ROOT, req.params.jobId);
-    const statusFile = path.join(jobDir, "status.json");
+app.get("/render10min/status/:jobId", async (req,res)=>{
 
-    if (!fs.existsSync(statusFile)) {
-      return res.status(404).json({ error: "job_not_found" });
-    }
+  const jobDir = path.join(JOB_ROOT,req.params.jobId);
+  const statusFile = path.join(jobDir,"status.json");
 
-    const data = JSON.parse(await fsp.readFile(statusFile));
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  if(!fs.existsSync(statusFile))
+    return res.status(404).json({error:"job_not_found"});
+
+  const data = JSON.parse(await fsp.readFile(statusFile));
+
+  res.json(data);
 });
 
 /* RESULT */
 
-app.get("/render10min/result/:jobId", async (req, res) => {
-  try {
-    const jobDir = path.join(JOB_ROOT, req.params.jobId);
-    const statusFile = path.join(jobDir, "status.json");
+app.get("/render10min/result/:jobId", async (req,res)=>{
 
-    if (!fs.existsSync(statusFile)) {
-      return res.status(404).json({ error: "job_not_found" });
-    }
+  const jobDir = path.join(JOB_ROOT,req.params.jobId);
+  const statusFile = path.join(jobDir,"status.json");
 
-    const status = JSON.parse(await fsp.readFile(statusFile));
+  if(!fs.existsSync(statusFile))
+    return res.status(404).json({error:"job_not_found"});
 
-    if (status.status !== "done") {
-      return res.status(404).json({ error: "not_ready" });
-    }
+  const status = JSON.parse(await fsp.readFile(statusFile));
 
-    res.setHeader("Content-Type", "video/mp4");
-    fs.createReadStream(status.outputPath).pipe(res);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  if(status.status !== "done")
+    return res.status(404).json({error:"not_ready"});
+
+  res.setHeader("Content-Type","video/mp4");
+
+  fs.createReadStream(status.outputPath).pipe(res);
 });
 
-app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+app.listen(PORT,()=>{
+
+  console.log("Server running on port "+PORT);
 });
