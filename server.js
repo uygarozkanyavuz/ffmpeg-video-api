@@ -56,7 +56,7 @@ async function ttsToWav(text, wavPath) {
   await fsp.writeFile(wavPath, buf);
 }
 
-/* ---------------- SLOW AUDIO ---------------- */
+/* ---------------- AUDIO SLOW ---------------- */
 
 async function slowAudio(input, output) {
   await runCmd("ffmpeg", [
@@ -83,7 +83,7 @@ async function transcribe(audioPath) {
 
 /* ---------------- ASS SUBTITLE ---------------- */
 
-async function createKaraokeAss(segments, assPath) {
+async function createAssSubtitles(segments, assPath) {
   let ass = `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -100,15 +100,9 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
   for (const seg of segments) {
     const start = secondsToAss(seg.start);
     const end = secondsToAss(seg.end);
-    const words = seg.text.trim().split(" ");
+    const text = seg.text.trim();
 
-    let line = "";
-
-    for (const w of words) {
-      line += `{\\c&H00FFFF&}${w} `;
-    }
-
-    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${line.trim()}\n`;
+    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}\n`;
   }
 
   await fsp.writeFile(assPath, ass);
@@ -156,7 +150,7 @@ async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
     "-i",
     audioPath,
     "-vf",
-    `ass=${assPath}`,
+    `scale=1280:720,ass=${assPath}`,
     "-map",
     "0:v",
     "-map",
@@ -165,6 +159,8 @@ async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
     "libx264",
     "-preset",
     "veryfast",
+    "-tune",
+    "stillimage",
     "-pix_fmt",
     "yuv420p",
     "-c:a",
@@ -206,7 +202,7 @@ app.post("/render10min/start", async (req, res) => {
 
         const segments = await transcribe(slowPath);
 
-        await createKaraokeAss(segments, assPath);
+        await createAssSubtitles(segments, assPath);
 
         await imagesPlusAudioToMp4(imagePath, slowPath, mp4Path, assPath);
 
