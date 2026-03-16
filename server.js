@@ -56,9 +56,22 @@ async function ttsToWav(text, wavPath) {
   await fsp.writeFile(wavPath, buf);
 }
 
+/* ---------------- SLOW AUDIO ---------------- */
+
+async function slowAudio(input, output) {
+  await runCmd("ffmpeg", [
+    "-y",
+    "-i",
+    input,
+    "-filter:a",
+    "atempo=0.85",
+    output,
+  ]);
+}
+
 /* ---------------- WHISPER ---------------- */
 
-async function transcribeWithTimestamps(audioPath) {
+async function transcribe(audioPath) {
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
     model: "whisper-1",
@@ -68,37 +81,45 @@ async function transcribeWithTimestamps(audioPath) {
   return transcription.segments || [];
 }
 
-/* ---------------- SRT ---------------- */
+/* ---------------- ASS SUBTITLE ---------------- */
 
-function secondsToSrtTime(sec) {
-  const date = new Date(sec * 1000);
-  const hh = String(date.getUTCHours()).padStart(2, "0");
-  const mm = String(date.getUTCMinutes()).padStart(2, "0");
-  const ss = String(date.getUTCSeconds()).padStart(2, "0");
-  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
-  return `${hh}:${mm}:${ss},${ms}`;
-}
+async function createKaraokeAss(segments, assPath) {
+  let ass = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1280
+PlayResY: 720
 
-async function createSentenceLevelSrt(segments, srtPath) {
-  let srt = "";
-  let index = 1;
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Default,Arial,36,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,0,0,1,2,0,2,10,10,40,1
 
-  for (const segment of segments) {
-    if (segment.start === undefined) continue;
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+`;
 
-    const start = segment.start;
-    const end = segment.end > start ? segment.end : start + 1;
-    const text = (segment.text || "").trim();
-    if (!text) continue;
+  for (const seg of segments) {
+    const start = secondsToAss(seg.start);
+    const end = secondsToAss(seg.end);
+    const words = seg.text.trim().split(" ");
 
-    srt += `${index}\n`;
-    srt += `${secondsToSrtTime(start)} --> ${secondsToSrtTime(end)}\n`;
-    srt += `${text}\n\n`;
+    let line = "";
 
-    index++;
+    for (const w of words) {
+      line += `{\\c&H00FFFF&}${w} `;
+    }
+
+    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${line.trim()}\n`;
   }
 
-  await fsp.writeFile(srtPath, srt);
+  await fsp.writeFile(assPath, ass);
+}
+
+function secondsToAss(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = (sec % 60).toFixed(2);
+
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(5, "0")}`;
 }
 
 /* ---------------- VIDEO ---------------- */
@@ -106,9 +127,12 @@ async function createSentenceLevelSrt(segments, srtPath) {
 async function ffprobeDuration(filePath) {
   return new Promise((resolve) => {
     const p = spawn("ffprobe", [
-      "-v", "error",
-      "-show_entries", "format=duration",
-      "-of", "default=noprint_wrappers=1:nokey=1",
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
       filePath,
     ]);
 
@@ -118,29 +142,37 @@ async function ffprobeDuration(filePath) {
   });
 }
 
-async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, srtPath) {
+async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
   const duration = await ffprobeDuration(audioPath);
-  const safeSrtPath = srtPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 
   await runCmd("ffmpeg", [
     "-y",
-    "-loop", "1",
-    "-t", duration.toString(),
-    "-i", imagePath,
-    "-i", audioPath,
-    "-filter_complex",
-    `[0:v]scale=1280:720,setsar=1[v0];` +
-    `[v0]subtitles=${safeSrtPath}:force_style='FontSize=28,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=40'[vout]`,
-    "-map", "[vout]",
-    "-map", "1:a",
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-tune", "stillimage",
-    "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "128k",
+    "-loop",
+    "1",
+    "-t",
+    duration.toString(),
+    "-i",
+    imagePath,
+    "-i",
+    audioPath,
+    "-vf",
+    `ass=${assPath}`,
+    "-map",
+    "0:v",
+    "-map",
+    "1:a",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
     "-shortest",
-    outMp4
+    outMp4,
   ]);
 }
 
@@ -153,12 +185,10 @@ app.post("/render10min/start", async (req, res) => {
     }
 
     const imagePath = path.join(process.cwd(), "assets", "sabit.jpg");
-    if (!fs.existsSync(imagePath)) {
-      return res.status(400).json({ error: "assets/sabit.jpg not found" });
-    }
 
     const jobId = uid();
     const jobDir = path.join(os.tmpdir(), `render_${jobId}`);
+
     await fsp.mkdir(jobDir, { recursive: true });
 
     jobs.set(jobId, { status: "processing" });
@@ -166,15 +196,19 @@ app.post("/render10min/start", async (req, res) => {
     setImmediate(async () => {
       try {
         const wavPath = path.join(jobDir, "audio.wav");
-        const srtPath = path.join(jobDir, "subtitles.srt");
+        const slowPath = path.join(jobDir, "audio_slow.wav");
+        const assPath = path.join(jobDir, "subtitles.ass");
         const mp4Path = path.join(jobDir, "output.mp4");
 
         await ttsToWav(req.body.text, wavPath);
 
-        const segments = await transcribeWithTimestamps(wavPath);
-        await createSentenceLevelSrt(segments, srtPath);
+        await slowAudio(wavPath, slowPath);
 
-        await imagesPlusAudioToMp4(imagePath, wavPath, mp4Path, srtPath);
+        const segments = await transcribe(slowPath);
+
+        await createKaraokeAss(segments, assPath);
+
+        await imagesPlusAudioToMp4(imagePath, slowPath, mp4Path, assPath);
 
         jobs.set(jobId, {
           status: "done",
@@ -195,6 +229,7 @@ app.post("/render10min/start", async (req, res) => {
 });
 
 /* STATUS */
+
 app.get("/render10min/status/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "job_not_found" });
@@ -202,8 +237,10 @@ app.get("/render10min/status/:jobId", (req, res) => {
 });
 
 /* RESULT */
+
 app.get("/render10min/result/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
+
   if (!job || job.status !== "done") {
     return res.status(404).json({ error: "not_ready" });
   }
