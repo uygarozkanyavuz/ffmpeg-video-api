@@ -98,7 +98,7 @@ PlayResY: 720
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Arial,42,&H00FFFFFF,&H00FF0000,&H00000000,&H00000000,0,0,1,2,0,2,10,10,40,1
+Style: Default,Arial,42,&H00FFFFFF,&H00FFE680,&H00000000,&H00000000,0,0,1,2,0,2,10,10,40,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -112,7 +112,8 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     const words = seg.text.trim().split(" ");
 
     const duration = seg.end - seg.start;
-    const perWord = duration / words.length;
+
+    const perWord = (duration / words.length) * 0.92;
 
     let karaoke = "";
 
@@ -135,7 +136,7 @@ function secondsToAss(sec) {
   const m = Math.floor((sec % 3600) / 60);
   const s = (sec % 60).toFixed(2);
 
-  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(5, "0")}`;
+  return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(5,"0")}`;
 }
 
 /* ---------------- VIDEO ---------------- */
@@ -166,7 +167,6 @@ async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
   await runCmd("ffmpeg", [
 
     "-y",
-
     "-loop","1",
     "-t",duration.toString(),
 
@@ -198,15 +198,12 @@ app.post("/render10min/start", async (req,res)=>{
 
   try{
 
-    if(!req.body?.text){
-
+    if(!req.body?.text)
       return res.status(400).json({error:"Missing text"});
-    }
 
     await ensureDir(JOB_ROOT);
 
     const jobId = uid();
-
     const jobDir = path.join(JOB_ROOT,jobId);
 
     await ensureDir(jobDir);
