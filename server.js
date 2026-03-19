@@ -11,6 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error("OPENAI_API_KEY missing");
@@ -62,19 +63,6 @@ async function ttsToWav(text, wavPath) {
   await fsp.writeFile(wavPath, buf);
 }
 
-/* ---------------- AUDIO SLOW ---------------- */
-
-async function slowAudio(input, output) {
-  await runCmd("ffmpeg", [
-    "-y",
-    "-i",
-    input,
-    "-filter:a",
-    "atempo=0.85",
-    output,
-  ]);
-}
-
 /* ---------------- WHISPER ---------------- */
 
 async function transcribe(audioPath) {
@@ -87,10 +75,9 @@ async function transcribe(audioPath) {
   return transcription.segments || [];
 }
 
-/* ---------------- ASS KARAOKE SUBTITLES ---------------- */
+/* ---------------- ASS SUBTITLE ---------------- */
 
 async function createKaraokeAss(segments, assPath) {
-
   let ass = `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -105,22 +92,17 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 `;
 
   for (const seg of segments) {
-
     const start = secondsToAss(seg.start);
     const end = secondsToAss(seg.end);
 
     const words = seg.text.trim().split(" ");
-
     const duration = seg.end - seg.start;
-
-    const perWord = (duration / words.length) * 0.92;
+    const perWord = (duration / words.length) * 0.9;
 
     let karaoke = "";
 
     for (const word of words) {
-
       const k = Math.floor(perWord * 100);
-
       karaoke += `{\\k${k}}${word} `;
     }
 
@@ -131,20 +113,17 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 }
 
 function secondsToAss(sec) {
-
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = (sec % 60).toFixed(2);
 
-  return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(5,"0")}`;
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(5, "0")}`;
 }
 
 /* ---------------- VIDEO ---------------- */
 
 async function ffprobeDuration(filePath) {
-
   return new Promise((resolve) => {
-
     const p = spawn("ffprobe", [
       "-v","error",
       "-show_entries","format=duration",
@@ -153,9 +132,7 @@ async function ffprobeDuration(filePath) {
     ]);
 
     let out = "";
-
     p.stdout.on("data",(d)=> out += d.toString());
-
     p.on("close",()=> resolve(Number(out.trim()) || 0));
   });
 }
@@ -165,29 +142,21 @@ async function imagesPlusAudioToMp4(imagePath, audioPath, outMp4, assPath) {
   const duration = await ffprobeDuration(audioPath);
 
   await runCmd("ffmpeg", [
-
     "-y",
     "-loop","1",
     "-t",duration.toString(),
-
     "-i",imagePath,
     "-i",audioPath,
-
     "-vf",`scale=1280:720,ass=${assPath}`,
-
     "-map","0:v",
     "-map","1:a",
-
     "-c:v","libx264",
     "-preset","veryfast",
     "-tune","stillimage",
     "-pix_fmt","yuv420p",
-
     "-c:a","aac",
     "-b:a","128k",
-
     "-shortest",
-
     outMp4
   ]);
 }
@@ -219,19 +188,18 @@ app.post("/render10min/start", async (req,res)=>{
       try{
 
         const wavPath = path.join(jobDir,"audio.wav");
-        const slowPath = path.join(jobDir,"audio_slow.wav");
         const assPath = path.join(jobDir,"subtitles.ass");
         const mp4Path = path.join(jobDir,"output.mp4");
 
+        // 🔥 TTS (normal hız)
         await ttsToWav(req.body.text,wavPath);
 
-        await slowAudio(wavPath,slowPath);
-
-        const segments = await transcribe(slowPath);
+        // 🔥 direkt transcription
+        const segments = await transcribe(wavPath);
 
         await createKaraokeAss(segments,assPath);
 
-        await imagesPlusAudioToMp4(imagePath,slowPath,mp4Path,assPath);
+        await imagesPlusAudioToMp4(imagePath,wavPath,mp4Path,assPath);
 
         await fsp.writeFile(statusFile,JSON.stringify({
           status:"done",
@@ -251,7 +219,6 @@ app.post("/render10min/start", async (req,res)=>{
     res.json({jobId});
 
   }catch(err){
-
     res.status(500).json({error:err.message});
   }
 
@@ -268,7 +235,6 @@ app.get("/render10min/status/:jobId", async (req,res)=>{
     return res.status(404).json({error:"job_not_found"});
 
   const data = JSON.parse(await fsp.readFile(statusFile));
-
   res.json(data);
 });
 
